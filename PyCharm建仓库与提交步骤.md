@@ -99,14 +99,17 @@
 * 点进 `arrow_puzzle.py` 能正常显示（不是乱码）
 
 **克隆验证**（作业里的加分项，也是我最推荐的一步）：
-换台机器或换个空文件夹，`git clone <你的仓库地址>`，然后按 README 跑：
+换台机器或换个空文件夹克隆一份，然后按 README 跑（**克隆出来的目录就是项目根目录，不用再 `cd` 子目录**）：
 
 ```bash
-cd arrow_puzzle
 python arrow_puzzle.py            # 应该直接能玩（pygame 在 vendor/ 里，不用装）
 python arrow_puzzle.py --selftest # 22 项自检全过
 python run_tests.py               # T01~T09 全过
 ```
+
+**本机没装 git 也能做这个验证**：PyCharm 欢迎界面（或 ☰ → **文件（File）→ 新建项目（New Project）**）
+→ 左侧选 **来自版本控制（Get from VCS）** → 粘贴仓库地址 → 选一个空目录 → 克隆。
+打开后 PyCharm 会让你选解释器（用你现有的 Python 3.7），然后直接运行 `arrow_puzzle.py` 即可。
 
 ---
 

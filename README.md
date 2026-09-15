@@ -192,8 +192,9 @@ def replay(self, history):
 
 ## 五、运行
 
+在**项目根目录**（也就是能看见 `arrow_puzzle.py` 的那一层）执行：
+
 ```bash
-cd arrow_puzzle
 python arrow_puzzle.py                # 从第 1 关开始
 python arrow_puzzle.py --level 2      # 直接从第 3 关开始（下标从 0 起）
 python arrow_puzzle.py --endless      # 直接进无尽模式
@@ -201,6 +202,9 @@ python arrow_puzzle.py --speed        # 直接进速度模式
 python arrow_puzzle.py --selftest     # 无窗口自检（22 项）
 python run_tests.py                   # 验收用例 T01~T09（无窗口，用临时存档）
 ```
+
+> 从 GitHub 克隆下来的目录就是你现在的项目根目录，直接在上面那条命令所在的位置运行即可，
+> 不需要再 `cd` 进任何子目录。
 
 `run_tests.py` 按验收清单逐条驱动真实游戏对象（鼠标/键盘都走真实事件），
 测完打印结果表和每条用例的实测数据；测试过程与结论记在
