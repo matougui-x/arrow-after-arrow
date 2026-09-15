@@ -199,7 +199,7 @@ python arrow_puzzle.py                # 从第 1 关开始
 python arrow_puzzle.py --level 2      # 直接从第 3 关开始（下标从 0 起）
 python arrow_puzzle.py --endless      # 直接进无尽模式
 python arrow_puzzle.py --speed        # 直接进速度模式
-python arrow_puzzle.py --selftest     # 无窗口自检（22 项）
+python arrow_puzzle.py --selftest     # 无窗口自检（23 项）
 python run_tests.py                   # 验收用例 T01~T09（无窗口，用临时存档）
 ```
 
@@ -229,7 +229,7 @@ python build_exe.py --onefile    # 打成单文件 exe（需要 %TEMP% 可写）
 启动慢，而且在写不了 `%TEMP%` 的受限环境（或被杀软拦）会直接起不来——
 实测报错 `Failed to extract SDL2.dll: fopen: Permission denied`。onedir 没有这一步。
 
-打完包之后，`exe --selftest` 可以再跑一遍 22 项自检（`--windowed` 没有控制台，
+打完包之后，`exe --selftest` 可以再跑一遍 23 项自检（`--windowed` 没有控制台，
 报告会写到 exe 旁边的 `selftest_report.txt`），退出码 0 就是全过。
 
 ### 分发什么（实测过）
@@ -237,7 +237,7 @@ python build_exe.py --onefile    # 打成单文件 exe（需要 %TEMP% 可写）
 | 方案 | 能不能跑 | 说明 |
 | --- | --- | --- |
 | 只拷 `ArrowAfterArrow.exe` | ❌ **不能** | exe 只是个入口，依赖同目录的 dll。实测：8 秒不退出、连自检报告都没生成（Python 都没起来） |
-| **整个 `dist/ArrowAfterArrow/` 文件夹** | ✅ **可以** | 换到别的路径、删掉 `maps/` 都能跑（退出码 0，22 项全过） |
+| **整个 `dist/ArrowAfterArrow/` 文件夹** | ✅ **可以** | 换到别的路径、删掉 `maps/` 都能跑（退出码 0，23 项全过） |
 | 整个 `arrow_puzzle/` 项目文件夹 | ✅ 可以但没必要 | 源码、`vendor/`、`build_tools/`、测试都不是运行必需品 |
 
 **结论：发 `dist/ArrowAfterArrow/` 这个文件夹（或者 `dist/ArrowAfterArrow.zip`，8.9 MB）。**
@@ -249,6 +249,37 @@ python build_exe.py --onefile    # 打成单文件 exe（需要 %TEMP% 可写）
 * 存档 `save.json` 玩过一局破了纪录才生成，位置也在 exe 旁边；
 * 文件夹可以整体拷到别的机器/别的目录，路径无关（实测换路径后正常运行）。
 
+### 文件完整性校验（确认文件没被改动）
+
+游戏带一份 `CHECKSUMS.txt`，里面是每个文件的 SHA-256 和整份清单的"指纹"。玩家可以自己算一遍来比对：
+
+```bash
+python arrow_puzzle.py --verify        # 按本地清单逐项核对，0=一致，1=不一致，2=没有清单
+python arrow_puzzle.py --hash          # 只打印每个文件的校验码和整体指纹
+python arrow_puzzle.py --hash-write    # 维护者用：改完代码/重新打包后重新生成清单
+```
+
+游戏里也有入口：**首页 →「文件校验」按钮**（或按 `V`）。界面里显示本地指纹、官方指纹、比对结论，
+并给出自己校验的命令；还有两个按钮：
+
+* **联网校验**：从仓库里那份 `CHECKSUMS.txt`（GitHub raw）取官方清单再比对 —— **这样即使本地的清单被一起改掉也骗不过**；
+* **打开仓库页**：用默认浏览器打开 <https://github.com/matougui-x/arrow-after-arrow>，
+  可以看/下载清单、看提交历史（觉得有用的话顺手点个 **Star** 就行）。
+
+清单收录：`arrow_puzzle.py`、`run_tests.py`、`build_exe.py`、`requirements.txt`、示例地图、
+`vendor/` 下的依赖，以及发行包 `dist/ArrowAfterArrow.zip` —— 一共 250 个文件。
+玩家自己的存档、`maps/` 里自己放的地图**不在**收录范围（它们本来就会变）。
+断网时联网校验会直接报告失败原因，不影响游戏。
+
+> ⚠️ **能做什么、不能做什么，说清楚**（界面上也写着）：
+> * **能**：发现文件损坏、被随手改动、少传/多传文件；**用远程清单还能发现"连本地清单一起被改掉"**；
+> * **不能**：远程清单依然依赖 **HTTPS 不被中间人攻破**和**仓库账号本身可信**。
+>   想彻底不依赖"从哪里取清单"，要靠**数字签名**（私钥签清单、公钥内置在游戏里）——**这一步本项目没有做**。
+> * 顺带说明为什么没做：用内置的对称密钥做 HMAC 是**假的安全**——密钥在源码里，谁都能重算一份"合法"的清单。
+>   只有非对称签名才需要攻击者拿不到的私钥，而它需要引入额外的库和密钥管理，超出这次作业的范围。
+>
+> 所以这个功能的定位是**完整性校验**，不是"安全防护"。这条边界 `CHECKSUMS.txt` 开头也写着。
+
 ### 操作
 
 | 按键 / 鼠标 | 作用 |
@@ -259,6 +290,7 @@ python build_exe.py --onefile    # 打成单文件 exe（需要 %TEMP% 可写）
 | R | 重开当前这一关 |
 | D | 开关「邻居图可视化」（开发用，会直接显示能不能走，正常玩别开） |
 | 空格 / 回车 | 首页开始关卡模式；结算界面触发主按钮 |
+| V | 首页：算一遍文件校验码，跟 `CHECKSUMS.txt` 比对 |
 | 工坊「地图」页 | 把 .json 放进 maps/ 目录 -> 刷新列表 -> 选中 -> 开始游戏 |
 | ESC | 游戏 / 结算界面返回主菜单；首页按则退出 |
 
@@ -447,7 +479,7 @@ def _nearest_other(self, cell, direction, owner):
 八、数据与规则     CellNode / Arrow / Board（轨道、邻居图、载入、提示、replay 撤销、绘制）
 九、Scene          StartScene / PlayingScene / WinScene / FailScene / TimeUpScene / WorkshopScene
 十、Game           窗口、状态机、三种模式入口、主循环
-十一、run_selftest() 22 项自检
+十一、run_selftest() 23 项自检
 十二、main()       入口（--level / --endless / --speed / --selftest）
 
 另有 run_tests.py 验收用例（T01~T09）与 BLOG_测试记录.md 测试记录。
@@ -472,7 +504,7 @@ def _nearest_other(self, cell, direction, owner):
 
 ## 十四、自检覆盖了什么
 
-`python arrow_puzzle.py --selftest` 跑 22 项（用临时存档，不会碰你自己的 `save.json`）：
+`python arrow_puzzle.py --selftest` 跑 23 项（用临时存档，不会碰你自己的 `save.json`）：
 
 1. 每支箭的图形朝向都与数据方向一致（整关渲染逐支核对"头格前缘比后缘窄"）
 2. 3 个关卡结构合法（越界/重叠/重复占格/箭身断开），统计拐弯箭头数量

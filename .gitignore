@@ -3,7 +3,11 @@
 
 # Python
 __pycache__/
-*.py[cod]
+# 注意：这里**不要**写成 *.py[cod] —— 那个字符组会连 .pyd 一起匹配，
+# 而 .pyd 是 Windows 上的编译扩展模块（pygame 的 base/display/draw/font... 全是 .pyd），
+# 是运行必需的。曾经因为它，克隆下来的 pygame 缺了 38 个 .pyd，直接 ModuleNotFoundError。
+*.pyc
+*.pyo
 *.egg-info/
 
 # 打包中间产物（dist/ 里的成品单独处理，见下面说明）
@@ -23,6 +27,7 @@ _pkgs/
 _temp_exe/
 _dist_check/
 _shots/
+_selftest_hash/
 _tmp_*.py
 _tmp_*.txt
 _test_out.txt

@@ -67,6 +67,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 
 # --------------------------------------------------------------------------
@@ -102,6 +103,7 @@ STATE_WIN = "state_win"
 STATE_FAIL = "state_fail"
 STATE_TIMEUP = "state_timeup"       # 速度模式时间到
 STATE_WORKSHOP = "state_workshop"   # 拓展 / 创意工坊
+STATE_VERIFY = "state_verify"       # 文件完整性校验
 
 # ---- 玩法模式 ----
 MODE_LEVEL = "level"        # 关卡模式
@@ -730,6 +732,245 @@ def map_fingerprint(level):
     }
     payload = json.dumps(canon, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+# --------------------------------------------------------------------------
+# 文件完整性校验（hash）
+#
+# 玩家拿到游戏之后，可以自己算一遍每个文件的 SHA-256，跟仓库里那份
+# CHECKSUMS.txt 对一下，确认文件没有损坏、也没有被人改动过。
+#
+# 【这个功能能做什么、不能做什么，界面上和文档里都如实写清楚】
+#   能：发现文件传输损坏、被随手改过、少传/多传了文件。
+#   不能：真正的"防篡改"。因为清单文件和游戏放在一起，能改游戏的人
+#         也能顺手把清单改掉（改完之后自己算一遍照样"一致"）。
+#         要真正防篡改，得靠数字签名，或者从可信渠道（官方 Release 页）
+#         单独取这份清单来比对。
+# --------------------------------------------------------------------------
+CHECKSUM_FILE = "CHECKSUMS.txt"
+HASH_ALGO = "sha256"
+# 官方仓库与远程清单地址（玩家可以拿远程清单来比对，这样即使本地清单被改也骗不过）
+REPO_URL = "https://github.com/matougui-x/arrow-after-arrow"
+REPO_RAW_URL = ("https://raw.githubusercontent.com/matougui-x/arrow-after-arrow"
+                "/master/CHECKSUMS.txt")
+REMOTE_TIMEOUT = 4.0
+# 清单收录范围：自己写的代码 + vendor/ 里的依赖 + 打包好的发行包。
+# 玩家自己的存档、maps/ 里自己放的地图都不收录（它们本来就会变）。
+HASH_CODE_FILES = ("arrow_puzzle.py", "run_tests.py", "build_exe.py",
+                   "requirements.txt")
+HASH_EXTRA_FILES = (os.path.join("dist", "ArrowAfterArrow.zip"),)
+HASH_EXTRA_DIRS = ("vendor",)
+HASH_SKIP_DIRS = ("__pycache__",)
+# 这些目录没进仓库（见 .gitignore），所以也不算进清单 ——
+# 否则别人克隆下来一校验就会报几百个"文件丢失"。
+HASH_SKIP_PATHS = ("vendor/pygame/tests", "vendor/pygame/docs")
+
+
+def sha256_file(path):
+    """算一个文件的 SHA-256（分块读，几十 MB 的依赖也不吃内存）。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hash_targets(root=None):
+    """要纳入清单的文件（相对路径）。顺序固定，两边算出来才对得上。"""
+    root = root or _HERE
+    targets = []
+    for rel in HASH_CODE_FILES + HASH_EXTRA_FILES:
+        if os.path.isfile(os.path.join(root, rel)):
+            targets.append(rel.replace(os.sep, "/"))
+    example = os.path.join("maps", EXAMPLE_MAP_FILE)
+    if os.path.isfile(os.path.join(root, example)):
+        targets.append(example.replace(os.sep, "/"))
+    for folder in HASH_EXTRA_DIRS:
+        base = os.path.join(root, folder)
+        for dirpath, dirnames, filenames in os.walk(base):
+            keep = []
+            for name in dirnames:
+                if name in HASH_SKIP_DIRS:
+                    continue
+                rel_dir = os.path.relpath(os.path.join(dirpath, name), root)
+                if rel_dir.replace(os.sep, "/") in HASH_SKIP_PATHS:
+                    continue
+                keep.append(name)
+            dirnames[:] = keep
+            for name in filenames:
+                if name.endswith((".pyc", ".pyo")):
+                    continue
+                full = os.path.join(dirpath, name)
+                targets.append(os.path.relpath(full, root).replace(os.sep, "/"))
+    return sorted(targets)
+
+
+def manifest_fingerprint(items):
+    """把整份清单再算一个指纹：任何一条内容变了，这个指纹就变。"""
+    digest = hashlib.sha256()
+    for rel, value in items:
+        digest.update(("%s  %s\n" % (value, rel)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def build_manifest(root=None):
+    """返回 ([(相对路径, sha256), ...], 整体指纹)。"""
+    root = root or _HERE
+    items = [(rel, sha256_file(os.path.join(root, rel)))
+             for rel in hash_targets(root)]
+    return items, manifest_fingerprint(items)
+
+
+def write_checksums(path=None, root=None):
+    """生成清单文件。改完代码、准备发布时跑一次 `--hash-write`。"""
+    root = root or _HERE
+    items, fingerprint = build_manifest(root)
+    path = path or os.path.join(root, CHECKSUM_FILE)
+    lines = [
+        "# 《一箭又一箭》文件完整性清单（%s）" % HASH_ALGO.upper(),
+        "# 用途：确认下载到的游戏文件有没有损坏、有没有被改动过。",
+        "# 校验：python arrow_puzzle.py --verify",
+        "# 生成：python arrow_puzzle.py --hash-write",
+        "# 收录范围：游戏代码 + vendor/ 依赖（玩家存档、自定义地图、打包产物不在内）。",
+        "# 提醒：本清单能发现文件损坏或被随手改动，但它和游戏放在一起 ——",
+        "#       能把游戏改掉的人也能顺手把这份清单改掉。真正的防篡改要靠数字签名，",
+        "#       或者从可信渠道（官方 Release 页）单独取这份清单来比对。",
+        "",
+    ]
+    for rel, value in items:
+        lines.append("%s  %s" % (value, rel))
+    lines.append("")
+    lines.append("# 指纹（以上清单整体的 %s）：%s" % (HASH_ALGO.upper(), fingerprint))
+    with open(path, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write("\n".join(lines) + "\n")
+    return {"path": path, "count": len(items), "fingerprint": fingerprint}
+
+
+def parse_checksums_text(text):
+    """把清单文本解析成 ([(相对路径, 哈希)], 指纹)。
+
+    本地文件和从 GitHub 取回来的文本走的是同一套解析，两边不会解析出两种结果。
+    """
+    items, fingerprint = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if "指纹" in line and "：" in line:
+                fingerprint = line.rsplit("：", 1)[1].strip()
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            items.append((parts[1].strip(), parts[0].strip()))
+    return items, fingerprint
+
+
+def read_checksums(path=None):
+    """读本地清单，返回 ([(相对路径, 哈希)], 指纹)；没有清单返回 (None, None)。"""
+    path = path or os.path.join(_HERE, CHECKSUM_FILE)
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            return parse_checksums_text(fp.read())
+    except (OSError, UnicodeDecodeError):
+        return None, None
+
+
+def compare_manifest(items, fingerprint=None, root=None):
+    """拿一份清单去核对当前文件（本地清单、远程清单都用它）。"""
+    root = root or _HERE
+    now, now_fingerprint = build_manifest(root)
+    current, expected = dict(now), dict(items)
+    changed = sorted(r for r in expected
+                     if r in current and current[r] != expected[r])
+    lost = sorted(r for r in expected if r not in current)
+    extra = sorted(r for r in current if r not in expected)
+    ok = not (changed or lost or extra)
+    return {"state": "ok" if ok else "bad", "fingerprint": now_fingerprint,
+            "expected": fingerprint, "changed": changed, "lost": lost,
+            "extra": extra, "checked": len(expected), "error": None,
+            "source": "local"}
+
+
+def verify_checksums(path=None, root=None):
+    """按本地清单核对当前文件，返回结果字典。"""
+    items, fingerprint = read_checksums(path)
+    if not items:
+        result = compare_manifest([], None, root)
+        result.update({"state": "missing", "expected": fingerprint})
+        return result
+    return compare_manifest(items, fingerprint, root)
+
+
+def fetch_text(url, timeout=REMOTE_TIMEOUT):
+    """取一个网址的文本。返回 (文本, 错误说明)，成功时错误为 None。
+
+    故意只用标准库 urllib，不引第三方依赖；没有网络也不抛异常，
+    而是把原因交给调用方，界面照常显示。
+    """
+    try:
+        import urllib.request
+    except ImportError as exc:                      # 极端精简的环境
+        return None, "当前环境没有 urllib（%s）" % exc
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "ArrowAfterArrow-integrity-check"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(4 * 1024 * 1024)   # 清单只有几十 KB，留个上限
+        return data.decode("utf-8", "replace"), None
+    except (OSError, ValueError) as exc:            # 断网/超时/域名解析失败都在这
+        return None, "%s：%s" % (type(exc).__name__, exc)
+
+
+def verify_against_remote(url=REPO_RAW_URL, root=None, timeout=REMOTE_TIMEOUT):
+    """从 GitHub 取官方清单，跟本地文件比对。
+
+    这样即使本地的 CHECKSUMS.txt 被一起改掉，也骗不过校验。
+    但前提是 HTTPS 和仓库本身可信 —— 真正的防篡改要靠签名，这里没做。
+    """
+    text, error = fetch_text(url, timeout)
+    if error:
+        result = compare_manifest([], None, root)
+        if "404" in error:
+            result.update({"state": "badremote", "source": "remote",
+                           "error": "远程没有这份清单（404）：可能还没推到仓库，"
+                                    "或分支名不对"})
+        else:
+            result.update({"state": "offline", "error": error,
+                           "source": "remote"})
+        return result
+    items, fingerprint = parse_checksums_text(text or "")
+    if not items:
+        result = compare_manifest([], None, root)
+        result.update({"state": "badremote", "source": "remote",
+                       "error": "取回来的内容里没有可用的清单（网址或分支可能不对）"})
+        return result
+    result = compare_manifest(items, fingerprint, root)
+    result["source"] = "remote"
+    return result
+
+
+def describe_verify(result):
+    """把校验结果变成一句人话（界面和命令行都用它）。"""
+    state = result["state"]
+    if state == "missing":
+        return "没有找到 %s，无法比对" % CHECKSUM_FILE
+    if state == "offline":
+        return "联网校验失败（%s）" % (result.get("error") or "取不到清单")
+    if state == "badremote":
+        return result.get("error") or "远程清单不可用"
+    if state == "ok":
+        return "%d 个文件全部一致" % result["checked"]
+    parts = []
+    if result["changed"]:
+        parts.append("%d 个文件被改动" % len(result["changed"]))
+    if result["lost"]:
+        parts.append("%d 个文件丢失" % len(result["lost"]))
+    if result["extra"]:
+        parts.append("%d 个文件不在清单里" % len(result["extra"]))
+    return "、".join(parts)
 
 
 # ==========================================================================
@@ -1836,12 +2077,17 @@ class StartScene(Scene):
                                      "无尽模式", self.start_endless,
                                      base_color=COLOR_BUTTON_ALT,
                                      hover_color=COLOR_BUTTON_ALT_HOVER)
-        self.workshop_button = Button(centered_rect(cx, 420, 252, 46),
+        self.workshop_button = Button(centered_rect(cx - 136, 420, 248, 46),
                                       "拓展 · 创意工坊", self.open_workshop,
                                       base_color=COLOR_BUTTON_ALT,
                                       hover_color=COLOR_BUTTON_ALT_HOVER)
+        self.verify_button = Button(centered_rect(cx + 136, 420, 248, 46),
+                                    "文件校验", self.open_verify,
+                                    base_color=COLOR_BUTTON_ALT,
+                                    hover_color=COLOR_BUTTON_ALT_HOVER)
         self.buttons = [self.main_button, self.speed_button,
-                        self.endless_button, self.workshop_button]
+                        self.endless_button, self.workshop_button,
+                        self.verify_button]
 
     # ---- 模式 ----
     def start_level_mode(self):
@@ -1860,6 +2106,9 @@ class StartScene(Scene):
     def open_workshop(self):
         self.game.change_state(STATE_WORKSHOP)
 
+    def open_verify(self):
+        self.game.change_state(STATE_VERIFY)
+
     # ---- 事件 ----
     def handle_event(self, event):
         for button in self.buttons:
@@ -1869,7 +2118,23 @@ class StartScene(Scene):
                                                           pygame.K_RETURN):
             self.start_level_mode()
             return True
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_v:
+            self.check_integrity()
+            return True
         return False
+
+    # ---- 文件完整性 ----
+    def check_integrity(self):
+        """算一遍每个文件的校验码，跟 CHECKSUMS.txt 比，明细打到控制台。"""
+        result = self.game.verify_integrity(force=True)
+        print("[校验] %s" % describe_verify(result))
+        print("        本地指纹 %s" % (result["fingerprint"] or "（算不出来）"))
+        print("        清单指纹 %s" % (result["expected"] or "（没有清单）"))
+        for label, keys in (("改动", "changed"), ("丢失", "lost"),
+                            ("多余", "extra")):
+            for rel in result[keys][:5]:
+                print("        %s：%s" % (label, rel))
+        return result
 
     # ---- 绘制 ----
     def draw(self, surface):
@@ -1918,6 +2183,212 @@ class StartScene(Scene):
 
         draw_text(surface, "空格 / 回车 也可以开始", FONT_FOOTNOTE,
                   COLOR_FOOTNOTE, center=(cx, 532))
+
+        # ---- 文件完整性：校验码 + 跟清单是否一致（按 V 或进「文件校验」页）----
+        result = self.game.integrity
+        if result is None:
+            official = self.game.official_hash()
+            if official:
+                text = "文件完整性：点「文件校验」或按 V 用校验码核对（清单 %s…）" % official[:8]
+                color = COLOR_FOOTNOTE
+            else:
+                text = "文件完整性：目录里没有 %s" % CHECKSUM_FILE
+                color = COLOR_FOOTNOTE
+        elif result["state"] == "ok":
+            text = "文件完整性：一致　校验码 %s" % result["fingerprint"][:16]
+            color = COLOR_SUCCESS
+        elif result["state"] == "missing":
+            text = "文件完整性：目录里没有 %s" % CHECKSUM_FILE
+            color = COLOR_FOOTNOTE
+        else:
+            text = "文件完整性：%s（按 V 重查）" % describe_verify(result)
+            color = COLOR_BLOCKED
+        draw_text(surface, text, FONT_FOOTNOTE, color, center=(cx, 566))
+
+
+class VerifyScene(Scene):
+    """文件完整性校验界面。
+
+    两种比法，区别如实写在界面上：
+      · 本地清单 CHECKSUMS.txt —— 快，但改了游戏的人也能顺手把这份清单改掉；
+      · GitHub 上的官方清单 —— 本地清单被一起改掉也骗不过，
+        代价是依赖 HTTPS 和仓库本身可信。
+    想彻底闭合（不依赖"从哪拿清单"）要靠数字签名，本项目没做，这一点也写在界面上。
+    """
+
+    def __init__(self, game):
+        Scene.__init__(self, game)
+        cx = WINDOW_WIDTH // 2
+        self.left_rect = pygame.Rect(24, 140, 468, 296)
+        self.right_rect = pygame.Rect(508, 140, 468, 296)
+        self.local_button = Button(centered_rect(cx - 230, 496, 200, 46),
+                                   "本地校验", self.check_local,
+                                   base_color=COLOR_BUTTON_ALT,
+                                   hover_color=COLOR_BUTTON_ALT_HOVER)
+        self.remote_button = Button(centered_rect(cx, 496, 200, 46),
+                                    "联网校验", self.check_remote)
+        self.repo_button = Button(centered_rect(cx + 230, 496, 200, 46),
+                                  "打开仓库页", self.open_repo,
+                                  base_color=COLOR_BUTTON_ALT,
+                                  hover_color=COLOR_BUTTON_ALT_HOVER)
+        self.back_button = Button(centered_rect(cx, 552, 240, 42),
+                                  "返回主菜单", self.back,
+                                  base_color=COLOR_BUTTON_ALT,
+                                  hover_color=COLOR_BUTTON_ALT_HOVER)
+        self.buttons = [self.local_button, self.remote_button,
+                        self.repo_button, self.back_button]
+        self.result = None
+        self.message = ""
+
+    def on_enter(self, **payload):
+        self.message = ""
+
+    # ---- 动作 ----
+    def check_local(self):
+        """用仓库里那份 CHECKSUMS.txt 比对。"""
+        self.result = verify_checksums()
+        self.message = "已用本地清单比对（清单本身也可能被改，见右下说明）"
+        return self.result
+
+    def check_remote(self):
+        """从 GitHub 取官方清单再比对。"""
+        self.result = verify_against_remote()
+        state = self.result["state"]
+        if state == "offline":
+            self.message = "连不上 GitHub，点「打开仓库页」可手动下载清单"
+        elif state == "badremote":
+            self.message = self.result.get("error") or "远程清单不可用"
+        else:
+            self.message = "已用 GitHub 上的官方清单比对"
+        return self.result
+
+    def open_repo(self):
+        """用系统默认浏览器打开仓库页（顺手可以点个 Star）。"""
+        try:
+            import webbrowser
+            opened = webbrowser.open(REPO_URL)
+        except Exception as exc:                    # 没有浏览器/权限受限
+            print("[校验] 打不开浏览器：%s" % exc)
+            opened = False
+        if opened:
+            self.message = "已打开仓库页：那儿有 CHECKSUMS.txt，顺手点个 Star 更好"
+        else:
+            self.message = "没能自动打开浏览器，手动访问 %s" % REPO_URL
+        print("[校验] 仓库地址：%s" % REPO_URL)
+        return opened
+
+    def back(self):
+        self.game.change_state(STATE_START)
+
+    # ---- 事件 ----
+    def handle_event(self, event):
+        for button in self.buttons:
+            if button.handle_event(event):
+                return True
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_v:
+            self.check_local()
+            return True
+        return False
+
+    # ---- 绘制 ----
+    def draw(self, surface):
+        surface.fill(BG_COLOR)
+        cx = WINDOW_WIDTH // 2
+        draw_text(surface, "文件完整性校验", FONT_TITLE, COLOR_TITLE,
+                  center=(cx, 58), bold=True)
+        draw_text(surface, "算一遍每个文件的 SHA-256，跟官方清单比对，确认文件没被改动过",
+                  FONT_HINT, COLOR_SUBTITLE, center=(cx, 102))
+
+        self.draw_local(surface)
+        self.draw_help(surface)
+
+        for button in self.buttons:
+            button.draw(surface)
+
+    def draw_local(self, surface):
+        """左面板：收录了多少文件、官方指纹、算出来的结论。"""
+        rect = self.left_rect
+        pygame.draw.rect(surface, COLOR_BOARD_BG, rect, border_radius=14)
+        pygame.draw.rect(surface, COLOR_CELL_BORDER, rect, width=2,
+                         border_radius=14)
+        draw_text(surface, "本地情况", FONT_BODY, COLOR_TITLE,
+                  midleft=(rect.left + 18, rect.top + 24))
+
+        listed, listed_hash = read_checksums()
+        result = self.result
+        rows = [("收录文件数", "%d 个" % len(listed) if listed else "没有清单"),
+                ("官方指纹", (listed_hash or "无")[:32])]
+        if result is not None:
+            rows.append(("本地指纹", (result["fingerprint"] or "算不出来")[:32]))
+            rows.append(("比对依据",
+                         "GitHub 官方清单" if result["source"] == "remote"
+                         else "本地 CHECKSUMS.txt"))
+        for index, (key, value) in enumerate(rows):
+            y = rect.top + 58 + index * 28
+            draw_text(surface, key, FONT_HINT, COLOR_SUBTITLE,
+                      midleft=(rect.left + 18, y))
+            draw_text(surface, value, FONT_HINT, COLOR_TITLE,
+                      midleft=(rect.left + 132, y))
+
+        if result is None:
+            state_text, state_color = "结论：还没校验，点下面按钮", COLOR_HINT
+        elif result["state"] == "ok":
+            state_text = "结论：一致，文件没有被改动过"
+            state_color = COLOR_SUCCESS
+        else:
+            # 面板宽度有限，这里只说结论，详细原因放在下面一行
+            short = {"missing": "没有找到本地清单",
+                     "offline": "联网校验没成功",
+                     "badremote": "远程清单不可用"}.get(result["state"])
+            state_text = "结论：%s" % (short or describe_verify(result))
+            state_color = COLOR_BLOCKED
+        draw_text(surface, state_text, FONT_HINT, state_color,
+                  midleft=(rect.left + 18, rect.top + 196))
+
+        if self.message:
+            draw_text(surface, self.message, FONT_TINY, COLOR_WARN,
+                      midleft=(rect.left + 18, rect.top + 226))
+        if result is not None and result["state"] == "bad":
+            detail = (result["changed"] + result["lost"] + result["extra"])[:2]
+            for index, rel in enumerate(detail):
+                draw_text(surface, "· %s" % rel, FONT_TINY, COLOR_BLOCKED,
+                          midleft=(rect.left + 18, rect.top + 254 + index * 17))
+
+    def draw_help(self, surface):
+        """右面板：自己怎么校验 + 这个功能能做什么、不能做什么。"""
+        rect = self.right_rect
+        pygame.draw.rect(surface, COLOR_BOARD_BG, rect, border_radius=14)
+        pygame.draw.rect(surface, COLOR_CELL_BORDER, rect, width=2,
+                         border_radius=14)
+        draw_text(surface, "怎么自己校验", FONT_BODY, COLOR_TITLE,
+                  midleft=(rect.left + 18, rect.top + 24))
+        steps = [
+            "1. 项目根目录执行：",
+            "     python arrow_puzzle.py --verify",
+            "   按本地清单逐项核对，打印「一致 / 不一致」",
+            "2. 想跟官方清单比（本地清单被改也骗不过）：",
+            "   点下方「联网校验」，或手动下载：",
+            "     raw.githubusercontent.com/…/CHECKSUMS.txt",
+            "3. 只想看每个文件的校验码：",
+            "     python arrow_puzzle.py --hash",
+        ]
+        for index, line in enumerate(steps):
+            draw_text(surface, line, FONT_TINY, COLOR_SUBTITLE,
+                      midleft=(rect.left + 18, rect.top + 54 + index * 19))
+
+        draw_text(surface, "能做什么 · 不能做什么", FONT_BODY, COLOR_TITLE,
+                  midleft=(rect.left + 18, rect.top + 218))
+        notes = [
+            ("能", "发现文件损坏、被随手改动、少传多传文件"),
+            ("远程清单", "连本地清单被一起改掉也能发现"),
+            ("但仍然", "依赖 HTTPS 和仓库本身可信"),
+            ("没做的", "数字签名（那才是真正的防篡改）"),
+        ]
+        for index, (key, value) in enumerate(notes):
+            y = rect.top + 246 + index * 17
+            color = COLOR_SUCCESS if key == "能" else COLOR_HINT
+            draw_text(surface, "· %s：%s" % (key, value), FONT_TINY, color,
+                      midleft=(rect.left + 18, y))
 
 
 class WorkshopScene(Scene):
@@ -2845,6 +3316,8 @@ class Game:
         self.start_mode = mode
         self.records = Records(records_path)
         self.sound = SoundKit()
+        self.integrity = None            # 文件校验结果（按需算，算完缓存）
+        self._official_hash = None       # CHECKSUMS.txt 里那份官方指纹
 
         # 第一次运行（尤其是打包成 exe 之后）先把 maps/ 目录和示例地图准备好，
         # 免得工坊地图页空空如也、玩家也不知道该往哪放文件
@@ -2861,6 +3334,7 @@ class Game:
             STATE_FAIL: FailScene(self),
             STATE_TIMEUP: TimeUpScene(self),
             STATE_WORKSHOP: WorkshopScene(self),
+            STATE_VERIFY: VerifyScene(self),
         }
         self.scene.on_enter()
 
@@ -2888,6 +3362,20 @@ class Game:
         scene.custom = level_data
         scene.set_limits(*feature_limits(MODE_CUSTOM))
         self.change_state(STATE_PLAYING)
+
+    # ---- 文件完整性校验 ----
+    def official_hash(self):
+        """CHECKSUMS.txt 里那份"官方指纹"（读一次就缓存）。"""
+        if self._official_hash is None:
+            _items, fingerprint = read_checksums()
+            self._official_hash = fingerprint or ""
+        return self._official_hash
+
+    def verify_integrity(self, force=False):
+        """算一遍文件校验码并跟清单比对（含 vendor，约 0.2 秒），结果缓存。"""
+        if self.integrity is None or force:
+            self.integrity = verify_checksums()
+        return self.integrity
 
     # ---- 三种模式的入口 ----
     def start_endless(self):
@@ -3708,20 +4196,101 @@ def run_selftest():
     assert workshop.maps, "地图页应该能扫到示例地图"
     print("[21] 自定义地图：加载 7 支、提示/撤销不限、通关后盖「已通关」并能回工坊  OK")
 
-    # ---------- 22. 六个界面都能画出来 ----------
+    # ---------- 22. 文件完整性校验（hash） ----------
+    manifest_path = os.path.join(_HERE, CHECKSUM_FILE)
+    assert os.path.isfile(manifest_path), \
+        "仓库里应该有 %s（跑 --hash-write 生成）" % CHECKSUM_FILE
+    listed, listed_hash = read_checksums(manifest_path)
+    assert listed and listed_hash, "清单应该能读出来并且带指纹"
+    assert len(listed) >= 100, "清单至少要收录代码 + vendor 依赖，实际 %d 条" % len(listed)
+    now_items, now_hash = build_manifest()
+    assert now_hash == listed_hash, "当前代码的指纹应该和清单一致（改完代码要重跑 --hash-write）"
+    good = verify_checksums(manifest_path)
+    assert good["state"] == "ok", "当前仓库应该校验通过，实际是 %s" % describe_verify(good)
+    assert not good["changed"] and not good["lost"] and not good["extra"]
+
+    # 改一个字节就必须被发现；顺便验证"少一个文件""多一个文件"也能发现
+    tmp_root = os.path.join(_HERE, "_selftest_hash")
+    if os.path.isdir(tmp_root):
+        shutil.rmtree(tmp_root)
+    os.makedirs(tmp_root)
+    try:
+        shutil.copy2(os.path.join(_HERE, "arrow_puzzle.py"),
+                     os.path.join(tmp_root, "arrow_puzzle.py"))
+        tmp_manifest = os.path.join(tmp_root, CHECKSUM_FILE)
+        write_checksums(tmp_manifest, root=tmp_root)
+        assert verify_checksums(tmp_manifest, root=tmp_root)["state"] == "ok"
+        with open(os.path.join(tmp_root, "arrow_puzzle.py"), "ab") as fp:
+            fp.write(b"\n# tampered\n")             # 篡改一个字节
+        tampered = verify_checksums(tmp_manifest, root=tmp_root)
+        assert tampered["state"] == "bad", "改过文件之后必须报不一致"
+        assert "arrow_puzzle.py" in tampered["changed"], tampered
+        os.remove(os.path.join(tmp_root, "arrow_puzzle.py"))
+        assert verify_checksums(tmp_manifest, root=tmp_root)["lost"], \
+            "文件丢了也要能发现"
+        # 没有清单时不能崩，只报告"无法比对"
+        assert read_checksums(os.path.join(tmp_root, "没有这个文件.txt")) == (None, None)
+        assert verify_checksums(os.path.join(tmp_root, "没有这个文件.txt"),
+                                root=tmp_root)["state"] == "missing"
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    print("[22] 文件完整性：清单 %d 条、指纹一致；改一字节/丢一个文件都能发现  OK"
+          % len(listed))
+
+    # ---------- 23. 远程清单校验 + 校验界面 ----------
+    # 本地文件、远程文本走同一套解析：随便造一份清单也能解析
+    sample = ("# 测试清单\n"
+              "aaaa  arrow_puzzle.py\n"
+              "bbbb  vendor/pygame/SDL2.dll\n"
+              "# 指纹（以上清单整体的 SHA256）：ffff\n")
+    parsed, parsed_hash = parse_checksums_text(sample)
+    assert parsed == [("arrow_puzzle.py", "aaaa"),
+                      ("vendor/pygame/SDL2.dll", "bbbb")], parsed
+    assert parsed_hash == "ffff", parsed_hash
+
+    # 拿一份"全对不上"的清单去比，三种情况都要能分出来（而且不抛异常）
+    wrong = [("arrow_puzzle.py", "0" * 64), ("没有这个文件.py", "0" * 64)]
+    mismatch = compare_manifest(wrong, "0" * 64)
+    assert mismatch["state"] == "bad"
+    assert mismatch["changed"] == ["arrow_puzzle.py"], mismatch["changed"]
+    assert mismatch["lost"] == ["没有这个文件.py"], mismatch["lost"]
+    assert "run_tests.py" in mismatch["extra"], "本地有、清单里没有的应算多余"
+
+    # 连不上网时必须"报告失败"，而不是崩或者假装通过
+    offline = verify_against_remote("http://127.0.0.1:1/CHECKSUMS.txt", timeout=2.0)
+    assert offline["state"] == "offline", offline
+    assert offline["error"], "离线也要给出原因"
+    assert "联网校验失败" in describe_verify(offline)
+    # 取回来不是清单（比如一个 HTML 页面）也要能识别
+    bad_remote = compare_manifest([], None)
+    bad_remote.update({"state": "badremote", "error": "没有可用的清单"})
+    assert describe_verify(bad_remote) == "没有可用的清单"
+
+    # 校验界面：本地校验能出结论，界面画得出来
+    game.change_state(STATE_VERIFY)
+    verify_scene = game.scenes[STATE_VERIFY]
+    local = verify_scene.check_local()
+    assert local["state"] == "ok", describe_verify(local)
+    assert len(verify_scene.buttons) == 4
+    assert "github.com" in REPO_URL and "CHECKSUMS.txt" in REPO_RAW_URL
+    game.process_frame([], 1.0 / 60.0)
+    print("[23] 远程校验：清单解析一致、离线报错不崩、%d 个文件本地校验通过、界面可绘制  OK"
+          % local["checked"])
+
+    # ---------- 24. 七个界面都能画出来 ----------
     for state in (STATE_START, STATE_PLAYING, STATE_WIN, STATE_FAIL,
-                  STATE_TIMEUP, STATE_WORKSHOP):
+                  STATE_TIMEUP, STATE_WORKSHOP, STATE_VERIFY):
         game.change_state(state, clicks=3, mistakes=1, has_next=True,
                           finished_all=False, mode=MODE_LEVEL, stage=1,
                           cleared=2, best=3, is_best=True, level_index=0)
         game.process_frame([], 1.0 / 60.0)
-    print("[22] 六个界面绘制正常  OK")
+    print("[24] 七个界面绘制正常  OK")
 
     game.shutdown()
     if os.path.isfile(save_path):
         os.remove(save_path)
     print("\n自检通过：图形朝向、关卡数据、沿轨道移动、提示/撤销、创意工坊（功能+地图）、"
-          "无尽/速度/自定义模式、最佳记录、状态机全部符合预期。")
+          "无尽/速度/自定义模式、最佳记录、文件完整性、状态机全部符合预期。")
     if report_path is not None:
         sys.stdout.flush()
     return 0
@@ -3730,9 +4299,52 @@ def run_selftest():
 # ==========================================================================
 # 十二、入口
 # ==========================================================================
+def print_hash_report():
+    """`--hash`：把每个文件的校验码和整体指纹打出来，玩家可以直接看。"""
+    items, fingerprint = build_manifest()
+    for rel, value in items:
+        print("%s  %s" % (value, rel))
+    print("")
+    print("收录文件数：%d" % len(items))
+    print("整体指纹（%s）：%s" % (HASH_ALGO.upper(), fingerprint))
+    return 0
+
+
+def print_verify_report():
+    """`--verify`：按 CHECKSUMS.txt 逐项核对，返回进程退出码。"""
+    result = verify_checksums()
+    if result["state"] == "missing":
+        print("没有找到 %s，无法校验。" % CHECKSUM_FILE)
+        print("（维护者可以跑 python arrow_puzzle.py --hash-write 生成清单）")
+        return 2
+    print("按 %s 逐项核对 %d 个文件……" % (CHECKSUM_FILE, result["checked"]))
+    for label, key in (("改动", "changed"), ("丢失", "lost"), ("多余", "extra")):
+        for rel in result[key]:
+            print("  [%s] %s" % (label, rel))
+    print("")
+    print("本地指纹：%s" % result["fingerprint"])
+    print("清单指纹：%s" % (result["expected"] or "（清单里没写指纹）"))
+    if result["state"] == "ok":
+        print("结论：一致，%d 个文件都没有被改动过。" % result["checked"])
+        return 0
+    print("结论：不一致 —— %s。" % describe_verify(result))
+    return 1
+
+
 def main():
     if "--selftest" in sys.argv:
         return run_selftest()
+
+    if "--hash" in sys.argv:
+        return print_hash_report()
+    if "--hash-write" in sys.argv:
+        info = write_checksums()
+        print("已生成 %s" % info["path"])
+        print("收录文件数：%d" % info["count"])
+        print("整体指纹（%s）：%s" % (HASH_ALGO.upper(), info["fingerprint"]))
+        return 0
+    if "--verify" in sys.argv:
+        return print_verify_report()
 
     level_index = 0
     if "--level" in sys.argv:

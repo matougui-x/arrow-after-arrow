@@ -50,7 +50,7 @@
 | --- | --- | --- |
 | 1 | `chore: 项目骨架（.gitignore / 依赖 / 内置 pygame）` | `.gitignore`、`requirements.txt`、**`vendor/` 目录** |
 | 2 | `feat: 一箭又一箭主体（状态机 + 棋盘 + 沿轨道移动 + 创意工坊）` | `arrow_puzzle.py` |
-| 3 | `test: 22 项自检 + T01~T09 验收用例` | `run_tests.py` |
+| 3 | `test: 23 项自检 + T01~T09 验收用例` | `run_tests.py` |
 | 4 | `build: 打包脚本与可执行文件` | `build_exe.py`、`dist/ArrowAfterArrow.zip` |
 | 5 | `asset: 示例地图与界面截图` | `maps/` 目录、`docs/` 目录 |
 | 6 | `docs: 说明文档、测试记录与作业博客` | `README.md`、`BLOG_测试记录.md`、`交作业版博客.md`、`博客补充材料.md`、`PyCharm建仓库与提交步骤.md` |
@@ -103,7 +103,7 @@
 
 ```bash
 python arrow_puzzle.py            # 应该直接能玩（pygame 在 vendor/ 里，不用装）
-python arrow_puzzle.py --selftest # 22 项自检全过
+python arrow_puzzle.py --selftest # 23 项自检全过
 python run_tests.py               # T01~T09 全过
 ```
 

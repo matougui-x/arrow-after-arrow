@@ -376,7 +376,7 @@ rate, _size, channels = info
 代码改完就"能跑"不等于"发出去的 exe 能跑"。打包用的是 PyInstaller
 （`python build_exe.py`，产物 `dist/ArrowAfterArrow/`），打完做了两步验证：
 
-**Step 1：让 exe 自己跑一遍全部 22 项自检。**
+**Step 1：让 exe 自己跑一遍全部 23 项自检。**
 
 `--windowed` 的 exe 没有控制台，`print` 会被丢掉，所以给 `run_selftest()` 加了一条：
 检测到 `sys.stdout is None` 就把 stdout/stderr 重定向到 exe 旁边的
