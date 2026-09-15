@@ -1,0 +1,55 @@
+# .gitignore —— 提交前先放好，免得把中间产物和临时文件传上去
+# （PyCharm 启用 Git 之后会自动读到它）
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 打包中间产物（dist/ 里的成品单独处理，见下面说明）
+build/
+build_tools/
+*.spec
+
+# 运行时生成的存档 / 报告（玩出来的成绩，不该进仓库）
+save.json
+_selftest_save.json
+_unittest_save.json
+selftest_report.txt
+maps/_selftest_broken.json
+
+# 临时脚本与截图工作目录
+_pkgs/
+_temp_exe/
+_dist_check/
+_shots/
+_tmp_*.py
+_tmp_*.txt
+_test_out.txt
+_selftest_out.txt
+_build_log.txt
+
+# 编辑器
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------
+# 下面这两样**故意不忽略**，因为它们让"克隆下来就能跑"成立：
+#   vendor/                  内置的 pygame 2.1.2（本机 Python 3.7 没装 pygame）
+#   dist/ArrowAfterArrow.zip 打包好的可执行文件（发给别人直接解压即玩）
+#
+# 但 pygame 自带的测试套件和文档我们用不到，忽略掉能让仓库小一半多：
+#   vendor/pygame/tests   226 个文件 3.2 MB —— 运行时不引用
+#   vendor/pygame/docs    214 个文件 6.3 MB —— 纯文档
+# 忽略之后 vendor 从 747 个文件 / 20 MB 降到 159 个文件 / 9.3 MB，
+# 提交界面里"未进行版本管理的文件"也从 552 条缩到 110 条左右。
+vendor/pygame/tests/
+vendor/pygame/docs/
+# examples 只有 124 个文件 1 MB，而且 pygame/camera.py 里有一句
+# `import pygame.examples.camera`（只有用摄像头功能才会走到，我们的游戏不用）。
+# 想让提交列表更短就取消下面这行的注释：
+# vendor/pygame/examples/
+
+# dist/ArrowAfterArrow/ 这个解压出来的文件夹（100 多个 dll）建议不要提交，
+# 需要的话用 zip 或者 GitHub Release 发布：
+dist/ArrowAfterArrow/
